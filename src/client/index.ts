@@ -1,11 +1,13 @@
 import amqp from "amqplib";
-import { declareAndBind, SimpleQueueType } from "../internal/pubsub/consume";
-import { ExchangePerilDirect, PauseKey } from "../internal/routing/routing";
+import { declareAndBind, SimpleQueueType, subscribeJSON } from "../internal/pubsub/consume";
+import { publishJSON } from "../internal/pubsub/publish";
+import { ExchangePerilDirect, ExchangePerilTopic, PauseKey, ArmyMovesPrefix, WarRecognitionsPrefix } from "../internal/routing/routing";
 import type { PlayingState } from "../internal/gamelogic/gamestate";
 import { GameState } from "../internal/gamelogic/gamestate";
 import { clientWelcome, getInput, commandStatus, printClientHelp, printQuit } from "../internal/gamelogic/gamelogic";
 import { commandSpawn } from "../internal/gamelogic/spawn";
 import { commandMove } from "../internal/gamelogic/move";
+import { handlerPause, handlerMove, handlerWar } from "./handlers";
 
 async function main() {
   const rabbitConnString = "amqp://guest:guest@localhost:5672/";
@@ -16,8 +18,11 @@ async function main() {
   });
 
   const username = await clientWelcome();
-  const [channel, queue] = await declareAndBind(conn, ExchangePerilDirect, `pause.${username}`, PauseKey, SimpleQueueType.Transient)
   const state = new GameState(username);
+  const ch = await conn.createConfirmChannel();
+  await subscribeJSON(conn, ExchangePerilDirect, `${PauseKey}.${username}`, PauseKey, SimpleQueueType.Transient, handlerPause(state));
+  await subscribeJSON(conn, ExchangePerilTopic, `${ArmyMovesPrefix}.${username}`, `${ArmyMovesPrefix}.*`, SimpleQueueType.Transient, handlerMove(state, ch));
+  await subscribeJSON(conn, ExchangePerilTopic, `${WarRecognitionsPrefix}`, `${WarRecognitionsPrefix}.*`, SimpleQueueType.Durable, handlerWar(state));
 
   mainLoop: while(true) {
     const input = await getInput();
@@ -35,7 +40,8 @@ async function main() {
 	break;
       case "move":
         try {
-          commandMove(state, input);
+          const move = commandMove(state, input);
+	  publishJSON(ch, ExchangePerilTopic, `${ArmyMovesPrefix}.${username}`, move);
         } catch(err) {
           console.error(err);
 	}

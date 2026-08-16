@@ -1,6 +1,7 @@
 import amqp from "amqplib";
 import { publishJSON } from "../internal/pubsub/publish";
-import { ExchangePerilDirect, PauseKey } from "../internal/routing/routing";
+import { declareAndBind, SimpleQueueType } from "../internal/pubsub/consume";
+import { ExchangePerilDirect, ExchangePerilTopic, GameLogSlug, PauseKey } from "../internal/routing/routing";
 import type { PlayingState } from "../internal/gamelogic/gamestate";
 import { printServerHelp, getInput } from "../internal/gamelogic/gamelogic";
 
@@ -14,6 +15,8 @@ async function main() {
   });
 
   const ch = await conn.createConfirmChannel();
+  const [topicChannel, queue] = await declareAndBind(conn, ExchangePerilTopic, GameLogSlug, `${GameLogSlug}.*`, SimpleQueueType.Durable);
+
 
   printServerHelp();
   mainLoop: while(true) {
@@ -24,10 +27,10 @@ async function main() {
 
     switch(input[0]){
       case "pause":
-        publishJSON(ch, ExchangePerilDirect, PauseKey, {IsPaused: true} as PlayingState);
+        publishJSON(ch, ExchangePerilDirect, PauseKey, {isPaused: true} as PlayingState);
         break;
       case "resume":
-        publishJSON(ch, ExchangePerilDirect, PauseKey, {IsPaused: false} as PlayingState);
+        publishJSON(ch, ExchangePerilDirect, PauseKey, {isPaused: false} as PlayingState);
         break;
       case "quit":
 	break mainLoop;
