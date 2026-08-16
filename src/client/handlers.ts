@@ -1,4 +1,4 @@
-import type { Channel, ConfirmChannel } from "amqplib";
+import type { ConfirmChannel } from "amqplib";
 import type {
   ArmyMove,
   RecognitionOfWar,
@@ -16,6 +16,7 @@ import {
   WarRecognitionsPrefix,
 } from "../internal/routing/routing.js";
 import { handleWar, WarOutcome } from "../internal/gamelogic/war.js";
+import { publishGameLog } from "./index.js";
 
 export function handlerPause(gs: GameState): (ps: PlayingState) => AckType {
   return (ps: PlayingState): AckType => {
@@ -65,6 +66,7 @@ export function handlerMove(
 
 export function handlerWar(
   gs: GameState,
+  ch: ConfirmChannel,
 ): (war: RecognitionOfWar) => Promise<AckType> {
   return async (war: RecognitionOfWar): Promise<AckType> => {
     try {
@@ -76,8 +78,40 @@ export function handlerWar(
         case WarOutcome.NoUnits:
           return AckType.NackDiscard;
         case WarOutcome.YouWon:
+          try {
+            await publishGameLog(
+              ch,
+              gs.getUsername(),
+              `${outcome.winner} won the war against ${outcome.loser}.`,
+            );
+          } catch (err) {
+            console.error("Error publishing game log:", err);
+            return AckType.NackRequeue;
+          }
+          return AckType.Ack;
         case WarOutcome.OpponentWon:
+          try {
+            await publishGameLog(
+              ch,
+              gs.getUsername(),
+              `${outcome.winner} won the war against ${outcome.loser}.`,
+            );
+          } catch (err) {
+            console.error("Error publishing game log:", err);
+            return AckType.NackRequeue;
+          }
+          return AckType.Ack;
         case WarOutcome.Draw:
+          try {
+            await publishGameLog(
+              ch,
+              gs.getUsername(),
+              `A war between ${outcome.attacker} and ${outcome.defender} resulted in a draw.`,
+            );
+          } catch (err) {
+            console.error("Error publishing game log:", err);
+            return AckType.NackRequeue;
+          }
           return AckType.Ack;
         default:
           const unreachable: never = outcome;
