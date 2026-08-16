@@ -1,42 +1,72 @@
 import amqp from "amqplib";
-import { publishJSON } from "../internal/pubsub/publish";
-import { declareAndBind, SimpleQueueType } from "../internal/pubsub/consume";
-import { ExchangePerilDirect, ExchangePerilTopic, GameLogSlug, PauseKey } from "../internal/routing/routing";
-import type { PlayingState } from "../internal/gamelogic/gamestate";
-import { printServerHelp, getInput } from "../internal/gamelogic/gamelogic";
+import { publishJSON } from "../internal/pubsub/publish.js";
+import {
+  ExchangePerilDirect,
+  ExchangePerilTopic,
+  GameLogSlug,
+  PauseKey,
+} from "../internal/routing/routing.js";
+import { getInput, printServerHelp } from "../internal/gamelogic/gamelogic.js";
+import { declareAndBind, SimpleQueueType } from "../internal/pubsub/consume.js";
 
 async function main() {
   const rabbitConnString = "amqp://guest:guest@localhost:5672/";
   const conn = await amqp.connect(rabbitConnString);
-  console.log("Starting Peril server...");
-  process.on("SIGINT", () => {
-    console.log("Shutting down Peril server...");
-    conn.close();
-  });
+  console.log("Peril game server connected to RabbitMQ!");
 
-  const ch = await conn.createConfirmChannel();
-  const [topicChannel, queue] = await declareAndBind(conn, ExchangePerilTopic, GameLogSlug, `${GameLogSlug}.*`, SimpleQueueType.Durable);
+  ["SIGINT", "SIGTERM"].forEach((signal) =>
+    process.on(signal, async () => {
+      try {
+        await conn.close();
+        console.log("RabbitMQ connection closed.");
+      } catch (err) {
+        console.error("Error closing RabbitMQ connection:", err);
+      } finally {
+        process.exit(0);
+      }
+    }),
+  );
 
+  const publishCh = await conn.createConfirmChannel();
+
+  await declareAndBind(
+    conn,
+    ExchangePerilTopic,
+    GameLogSlug,
+    `${GameLogSlug}.*`,
+    SimpleQueueType.Durable,
+  );
 
   printServerHelp();
-  mainLoop: while(true) {
-    const input = await getInput();
-    if (input.length < 1) {
-      continue;
-    }
 
-    switch(input[0]){
-      case "pause":
-        publishJSON(ch, ExchangePerilDirect, PauseKey, {isPaused: true} as PlayingState);
-        break;
-      case "resume":
-        publishJSON(ch, ExchangePerilDirect, PauseKey, {isPaused: false} as PlayingState);
-        break;
-      case "quit":
-	break mainLoop;
-      default:
-        console.log("Unknown command, try again");
-        break;
+  while (true) {
+    const words = await getInput();
+    if (words.length === 0) continue;
+
+    const command = words[0];
+    if (command === "pause") {
+      console.log("Publishing paused game state");
+      try {
+        await publishJSON(publishCh, ExchangePerilDirect, PauseKey, {
+          isPaused: true,
+        });
+      } catch (err) {
+        console.error("Error publishing pause message:", err);
+      }
+    } else if (command === "resume") {
+      console.log("Publishing resumed game state");
+      try {
+        await publishJSON(publishCh, ExchangePerilDirect, PauseKey, {
+          isPaused: false,
+        });
+      } catch (err) {
+        console.error("Error publishing resume message:", err);
+      }
+    } else if (command === "quit") {
+      console.log("Goodbye!");
+      process.exit(0);
+    } else {
+      console.log("Unknown command");
     }
   }
 }
@@ -45,3 +75,4 @@ main().catch((err) => {
   console.error("Fatal error:", err);
   process.exit(1);
 });
+

@@ -1,12 +1,14 @@
+import amqp, { type Channel } from "amqplib";
+
+export enum AckType {
+  Ack,
+  NackDiscard,
+  NackRequeue,
+}
+
 export enum SimpleQueueType {
   Durable,
   Transient,
-}
-
-export enum Acktype {
-  Ack,
-  NackRequeue,
-  NackDiscard,
 }
 
 export async function declareAndBind(
@@ -16,13 +18,19 @@ export async function declareAndBind(
   key: string,
   queueType: SimpleQueueType,
 ): Promise<[Channel, amqp.Replies.AssertQueue]> {
-  const chan = await conn.createChannel();
-  const queue = await chan.assertQueue(
-    queueName,
-    {durable: queueType === SimpleQueueType.Durable, autoDelete: queueType === SimpleQueueType.Transient, exclusive: queueType === SimpleQueueType.Transient, arguments: {"x-dead-letter-exchange": "peril_dlx"}}
-  );
-  await chan.bindQueue(queueName, exchange, key);
-  return [chan, queue];
+  const ch = await conn.createChannel();
+
+  const queue = await ch.assertQueue(queueName, {
+    durable: queueType === SimpleQueueType.Durable,
+    exclusive: queueType !== SimpleQueueType.Durable,
+    autoDelete: queueType !== SimpleQueueType.Durable,
+    arguments: {
+      "x-dead-letter-exchange": "peril_dlx",
+    },
+  });
+
+  await ch.bindQueue(queue.queue, exchange, key);
+  return [ch, queue];
 }
 
 export async function subscribeJSON<T>(
@@ -31,23 +39,52 @@ export async function subscribeJSON<T>(
   queueName: string,
   key: string,
   queueType: SimpleQueueType,
-  handler: (data: T) => Acktype,
+  handler: (data: T) => Promise<AckType> | AckType,
 ): Promise<void> {
-  const [chan, queue] = await declareAndBind(conn, exchange, queueName, key, queueType);
-  await chan.consume(queueName, (msg: amqp.ConsumeMessage | null) => {
-    if (msg === null) return null;
-    const parsed = JSON.parse(msg.content.toString("utf-8"));
-    const acking = handler(parsed);
-    switch (acking) {
-      case Acktype.Ack:
-        chan.ack(msg);
-        break;
-      case Acktype.NackRequeue:
-        chan.nack(msg, false, true);
-        break;
-      case Acktype.NackDiscard:
-        chan.nack(msg, false, false);
-        break;
+  const [ch, queue] = await declareAndBind(
+    conn,
+    exchange,
+    queueName,
+    key,
+    queueType,
+  );
+
+  await ch.consume(queue.queue, async (msg: amqp.ConsumeMessage | null) => {
+    if (!msg) return;
+
+    let data: T;
+    try {
+      data = JSON.parse(msg.content.toString());
+    } catch (err) {
+      console.error("Could not unmarshal message:", err);
+      return;
+    }
+
+    try {
+      const result = await handler(data);
+      switch (result) {
+        case AckType.Ack:
+          ch.ack(msg);
+          console.log("Ack");
+          break;
+        case AckType.NackDiscard:
+          ch.nack(msg, false, false);
+          console.log("NackDiscard");
+          break;
+        case AckType.NackRequeue:
+          ch.nack(msg, false, true);
+          console.log("NackRequeue");
+          break;
+        default:
+          const unreachable: never = result;
+          console.error("Unexpected ack type:", unreachable);
+          return;
+      }
+    } catch (err) {
+      console.error("Error handling message:", err);
+      ch.nack(msg, false, false);
+      return;
     }
   });
 }
+

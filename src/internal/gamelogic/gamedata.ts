@@ -46,3 +46,4 @@ export interface RecognitionOfWar {
   attacker: Player;
   defender: Player;
 }
+

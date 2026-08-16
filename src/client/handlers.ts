@@ -1,56 +1,92 @@
-import type { GameState, PlayingState } from "../internal/gamelogic/gamestate";
-import type { ArmyMove } from "../internal/gamelogic/gamedata";
-import { handlePause } from "../internal/gamelogic/pause";
-import { handleMove, MoveOutcome } from "../internal/gamelogic/move";
-import { handleWar, WarOutcome } from "../internal/gamelogic/war";
-import { Acktype } from "../internal/pubsub/consume";
-import { publishJSON } from "../internal/pubsub/publish";
-import { ExchangePerilTopic, WarRecognitionsPrefix } from "../internal/routing/routing";
+import type { Channel, ConfirmChannel } from "amqplib";
+import type {
+  ArmyMove,
+  RecognitionOfWar,
+} from "../internal/gamelogic/gamedata.js";
+import type {
+  GameState,
+  PlayingState,
+} from "../internal/gamelogic/gamestate.js";
+import { handleMove, MoveOutcome } from "../internal/gamelogic/move.js";
+import { handlePause } from "../internal/gamelogic/pause.js";
+import { AckType } from "../internal/pubsub/consume.js";
+import { publishJSON } from "../internal/pubsub/publish.js";
+import {
+  ExchangePerilTopic,
+  WarRecognitionsPrefix,
+} from "../internal/routing/routing.js";
+import { handleWar, WarOutcome } from "../internal/gamelogic/war.js";
 
-export function handlerPause(gs: GameState): (ps: PlayingState) => Acktype {
-  return (ps: PlayingState) => {
+export function handlerPause(gs: GameState): (ps: PlayingState) => AckType {
+  return (ps: PlayingState): AckType => {
     handlePause(gs, ps);
     process.stdout.write("> ");
-    return Acktype.Ack;
-  }
+    return AckType.Ack;
+  };
 }
 
-export function handlerMove(gs: GameState, ch: ConfirmChannel): (m: ArmyMove) => Acktype {
-  return (m: ArmyMove) => {
-    const outcome = handleMove(gs, m);
-    process.stdout.write("> ");
-    if (outcome === MoveOutcome.Safe) {
-      return Acktype.Ack;
-    }
+export function handlerMove(
+  gs: GameState,
+  ch: ConfirmChannel,
+): (move: ArmyMove) => Promise<AckType> {
+  return async (move: ArmyMove): Promise<AckType> => {
+    try {
+      const outcome = handleMove(gs, move);
+      switch (outcome) {
+        case MoveOutcome.Safe:
+        case MoveOutcome.SamePlayer:
+          return AckType.Ack;
+        case MoveOutcome.MakeWar:
+          const recognition: RecognitionOfWar = {
+            attacker: move.player,
+            defender: gs.getPlayerSnap(),
+          };
 
-    if (outcome === MoveOutcome.MakeWar) {
-      const rw: RecognitionOfWar = {
-        attacker: m.player,
-	defender: gs.getPlayerSnap(),
-      };
-      publishJSON(ch, ExchangePerilTopic, `${WarRecognitionsPrefix}.${gs.getUsername()}`, rw);
-      return Acktype.NackRequeue;
+          try {
+            await publishJSON(
+              ch,
+              ExchangePerilTopic,
+              `${WarRecognitionsPrefix}.${gs.getUsername()}`,
+              recognition,
+            );
+            return AckType.Ack;
+          } catch (err) {
+            console.error("Error publishing war recognition:", err);
+            return AckType.NackRequeue;
+          }
+        default:
+          return AckType.NackDiscard;
+      }
+    } finally {
+      process.stdout.write("> ");
     }
-
-    // Either unknown/invalid or the SamePlayer type
-    return Acktype.NackDiscard;
-  }
+  };
 }
 
-export function handlerWar(gs: GameState): (rw: RecognitionOfWar) => Acktype {
-  return (rw: RecognitionOfWar) => {
-    const outcome = handleWar(gs, rw);
-    process.stdout.write("> ");
-    switch (outcome) {
-      case WarOutcome.OpponentWon:
-      case WarOutcome.YouWon:
-      case WarOutcome.Draw:
-        return Acktype.Ack;
-      case WarOutcome.NotInvolved:
-        return Acktype.NackRequeue;
-      case WarOutcome.NoUnits:
-      default:
-        return Acktype.NackDiscard;
+export function handlerWar(
+  gs: GameState,
+): (war: RecognitionOfWar) => Promise<AckType> {
+  return async (war: RecognitionOfWar): Promise<AckType> => {
+    try {
+      const outcome = handleWar(gs, war);
+
+      switch (outcome.result) {
+        case WarOutcome.NotInvolved:
+          return AckType.NackRequeue;
+        case WarOutcome.NoUnits:
+          return AckType.NackDiscard;
+        case WarOutcome.YouWon:
+        case WarOutcome.OpponentWon:
+        case WarOutcome.Draw:
+          return AckType.Ack;
+        default:
+          const unreachable: never = outcome;
+          console.log("Unexpected war resolution: ", unreachable);
+          return AckType.NackDiscard;
+      }
+    } finally {
+      process.stdout.write("> ");
     }
-  }
+  };
 }
+
